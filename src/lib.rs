@@ -35,6 +35,29 @@ pub enum MailEntryError {
     DateError(&'static str),
 }
 
+/// On Darwin-based OSs (macOS, iOS, etc), Rust uses F_FULLFSYNC
+/// instead of plain fsync(2). fsync(2) on Darwin doesn't have the
+/// same guarantees as on Linux, but on the other hand F_FULLFSYNC is
+/// a more expensive operation. Use F_BARRIERFSYNC on these OSs to get
+/// the semantics that the Maildir spec needs.
+#[cfg(all(target_vendor = "apple", feature = "barrier_fsync"))]
+fn fsync_file(file: &fs::File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let fd = file.as_raw_fd();
+    // SAFETY: fd is owned by `file` and stays valid for the call
+    let rc = unsafe { libc::fcntl(fd, libc::F_BARRIERFSYNC) };
+    if rc == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(any(not(target_vendor = "apple"), not(feature = "barrier_fsync")))]
+fn fsync_file(file: &fs::File) -> std::io::Result<()> {
+    file.sync_all()
+}
+
 impl fmt::Display for MailEntryError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
@@ -815,7 +838,7 @@ impl Maildir {
         };
 
         file.write_all(data)?;
-        file.sync_all()?;
+        fsync_file(&file)?;
 
         let meta = file.metadata()?;
         let mut newpath = self.path.clone();
